@@ -1,0 +1,32 @@
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions._
+
+object Matching {
+  def main(args: Array[String]) {
+    val spark = SparkSession.builder().master("local[*]").appName("test").getOrCreate()
+    import spark.implicits._
+    val df = spark.read.format("csv").option("header", "true").option("inferschema", "true").load("/Working/sample/exampleOrders.csv")
+
+    df.registerTempTable("sourcetable")
+    val selldf = df.where('ordertype === "SELL")
+    val buydf = df.where('ordertype === "BUY")
+
+    buydf.registerTempTable("buytable")
+    selldf.registerTempTable("selltable")
+    
+    import org.apache.spark.sql.expressions.Window
+    val win = Window.partitionBy("sodt").orderBy("price")
+    val buymatch = spark.sql("select buytable.orderid buyorderid,selltable.orderid sellorderid,buytable.ordertime bodt, selltable.ordertime sodt,quantity,buytable.price from buytable join selltable using(quantity) where buytable.orderid < selltable.orderid order by quantity,selltable.orderid").
+    withColumn("rno",row_number().over(win)).where('rno ===1).drop("rno")
+
+    val sellmatch = spark.sql("select buytable.orderid buyorderid,selltable.orderid sellorderid,buytable.ordertime bodt, selltable.ordertime sodt,quantity,selltable.price from selltable join buytable using(quantity) where selltable.orderid < buytable.orderid order by quantity,buytable.orderid").
+    withColumn("rno",row_number().over(win)).where('rno ===1).drop("rno")
+
+    val closed = buymatch.union(sellmatch)
+    closed.select('buyorderid, 'sellorderid, greatest('bodt,'sodt).as("orderdate"),'quantity,'price).show(false)
+    closed.registerTempTable("closedorders")
+    
+    val nonClosed = spark.sql("select * from sourcetable where orderid not in(select buyorderid from closedorders union select sellorderid from closedorders)")
+    nonClosed.show(false)
+ }
+}
